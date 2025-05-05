@@ -1,91 +1,82 @@
 import telebot
 from telebot import types
 import json
+import os
 import requests
-from config import BOT_TOKEN
+
+# === טוען את קובץ ההגדרות ===
+with open("config.json", "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+BOT_TOKEN = config["BOT_TOKEN"]
+TON_API = config["TON_API"]
+DEFAULT_WALLET = config["DEFAULT_WALLET"]
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# טוען כתובות שמורות
-def load_wallets():
-    try:
-        with open("wallets.json", "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+# === ניהול ארנקים ===
+wallets_file = "wallets.json"
 
-def save_wallets(wallets):
-    with open("wallets.json", "w") as f:
-        json.dump(wallets, f)
+def load_wallets():
+    if not os.path.exists(wallets_file) or os.path.getsize(wallets_file) == 0:
+        return {}
+    with open(wallets_file, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_wallets(data):
+    with open(wallets_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
 
 user_wallets = load_wallets()
 
-# בדיקת יתרה מארנק TON דרך tonapi.io
-def get_ton_balance(address):
-    try:
-        response = requests.get(f"https://tonapi.io/v1/account/{address}")
-        data = response.json()
-        balance = int(data["balance"]) / 1e9
-        return round(balance, 4)
-    except:
-        return None
-
-# תפריט ראשי
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
+# === /start ===
+@bot.message_handler(commands=["start"])
+def start(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("🔐 התחבר לארנק טלגרם", url="https://t.me/wallet"),
-        types.InlineKeyboardButton("📤 שלח כתובת TON", callback_data="send_wallet"),
-        types.InlineKeyboardButton("💰 בדוק יתרה", callback_data="check_balance"),
-        types.InlineKeyboardButton("📘 למדו איך זה עובד", callback_data="learn"),
+        types.InlineKeyboardButton("🔗 התחבר לארנק", callback_data="connect"),
+        types.InlineKeyboardButton("💰 בדוק יתרה", callback_data="balance"),
+        types.InlineKeyboardButton("📤 שלח כסף", callback_data="send"),
+        types.InlineKeyboardButton("⚙️ הגדרות", callback_data="settings")
     )
-    bot.send_message(message.chat.id, "👋 ברוך הבא לבוט שמנגיש את עולם הקריפטו דרך טלגרם!\nבחר פעולה:", reply_markup=markup)
+    bot.send_message(message.chat.id, "👋 ברוך הבא לבוט ארנק טלגרם!\nבחר פעולה:", reply_markup=markup)
 
-# לחיצות על כפתורים
+# === כפתורים ===
 @bot.callback_query_handler(func=lambda call: True)
 def handle_buttons(call):
-    chat_id = str(call.message.chat.id)
+    user_id = str(call.from_user.id)
+    
+    if call.data == "connect":
+        bot.send_message(call.message.chat.id, "📥 אנא שלח את כתובת הארנק שלך (TON).")
+        bot.register_next_step_handler(call.message, save_wallet_address)
+    
+    elif call.data == "balance":
+        wallet = user_wallets.get(user_id, DEFAULT_WALLET)
+        ton_balance = get_ton_balance(wallet)
+        bot.send_message(call.message.chat.id, f"💰 יתרת הארנק שלך היא:\n{ton_balance} TON")
+    
+    elif call.data == "send":
+        bot.send_message(call.message.chat.id, "📤 הפונקציה תתווסף בהמשך. (שליחת TON לארנק אחר)")
+    
+    elif call.data == "settings":
+        bot.send_message(call.message.chat.id, "⚙️ כאן תוכל להגדיר העדפות נוספות (בהמשך).")
 
-    if call.data == "send_wallet":
-        bot.send_message(call.message.chat.id, "📥 שלח את כתובת ה־TON שלך (מתחילה ב־UQC... או EQ...):")
+# === שמירת ארנק ===
+def save_wallet_address(message):
+    user_id = str(message.from_user.id)
+    user_wallets[user_id] = message.text.strip()
+    save_wallets(user_wallets)
+    bot.send_message(message.chat.id, "✅ הארנק שלך נשמר בהצלחה!")
 
-    elif call.data == "check_balance":
-        address = user_wallets.get(chat_id)
-        if not address:
-            bot.send_message(call.message.chat.id, "⚠️ לא נמצאה כתובת. לחץ שוב על '📤 שלח כתובת TON'")
-            return
+# === בדיקת יתרה ב-TON ===
+def get_ton_balance(wallet_address):
+    try:
+        response = requests.get(f"{TON_API}/accounts/{wallet_address}")
+        data = response.json()
+        balance = int(data.get("balance", 0)) / 1e9  # TON מחושב ב-nanoTON
+        return round(balance, 4)
+    except Exception as e:
+        return f"שגיאה: {e}"
 
-        bot.send_message(call.message.chat.id, "⏳ בודק יתרה...")
-        balance = get_ton_balance(address)
-        if balance is not None:
-            bot.send_message(call.message.chat.id, f"💰 היתרה שלך: {balance} TON")
-        else:
-            bot.send_message(call.message.chat.id, "❌ שגיאה בבדיקת יתרה. ודא שהכתובת נכונה.")
-
-    elif call.data == "learn":
-        text = (
-            "📘 *שימוש בארנק טלגרם להעברת כספים*\n\n"
-            "בישראל, אין חובת דיווח על כל פעולה בקריפטו – רק *בעת מימוש* (למשל המרה לשקלים).\n\n"
-            "➕ כאשר אתה שולח TON למשתמש אחר בטלגרם, לא מתבצע מימוש לפיאט\n"
-            "📤 לכן זו העברה פרטית, ללא מיסוי מיידי\n"
-            "📊 כך ניתן לנהל קהילה, לתגמל משתמשים, ולהעביר ערך בלי חשש ממס.\n\n"
-            "_מידע זה אינו מהווה ייעוץ מס. לשימוש חינוכי בלבד._"
-        )
-        bot.send_message(call.message.chat.id, text, parse_mode='Markdown')
-
-# קבלת כתובת מהמשתמש
-@bot.message_handler(func=lambda message: message.text.startswith("UQC") or message.text.startswith("EQ"))
-def save_wallet(message):
-    chat_id = str(message.chat.id)
-    address = message.text.strip()
-
-    if 48 <= len(address) <= 64:
-        user_wallets[chat_id] = address
-        save_wallets(user_wallets)
-        bot.send_message(chat_id, "✅ כתובת נשמרה בהצלחה!")
-    else:
-        bot.send_message(chat_id, "❌ כתובת לא תקינה. ודא שהיא מתחילה ב־UQC או EQ וכוללת לפחות 48 תווים.")
-
-print("🤖 הבוט מחכה להודעות...")
+print("🚀 הבוט עלה... מחכה להודעות")
 bot.infinity_polling()
